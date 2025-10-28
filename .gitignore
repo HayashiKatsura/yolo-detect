@@ -171,3 +171,7 @@ pnnx*
 
 # calibration image
 calibration_*.npy
+
+
+# augment
+_project/mydata/_code/_augment
