@@ -1,0 +1,12 @@
+conf: 0.25
+mAP50: 0.73
+mAP75: 0.38
+mAP50-95: 0.37
+mAP50: 0.73
+mAP50-95: 0.37
+crack: 0.31
+corrosion: 0.89
+obstacle: 0.99
+mean-ap50: 0.73
+precision: 0.78
+recall: 0.66

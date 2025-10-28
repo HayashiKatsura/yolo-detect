@@ -1,0 +1,7 @@
+path:
+train: 
+val: 
+names: 
+  0: crack
+  1: corrosion
+  2: obstacle

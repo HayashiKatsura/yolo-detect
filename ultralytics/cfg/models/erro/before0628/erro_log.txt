@@ -1,0 +1,74 @@
+yolo12.yaml
+Dataset '/home/panxiang/coding/kweilx/ultralytics/_project/mydata/_a_datasets/multi_class/5_six_anomolies/mydata.yaml' error ❌ 
+Dataset '/home/panxiang/coding/kweilx/ultralytics/_project/mydata/_a_datasets/multi_class/5_six_anomolies/mydata.yaml' images not found ⚠️, missing path '/home/panxiang/coding/kweilx/ultralytics/_project/mydata/_a_datasets/multi_class/6_six_anomolies/images/val'
+Note dataset download directory is '/home/panxiang/Documents/kweilxfilebox/yolov8/datasets'. You can update this in '/home/panxiang/.config/Ultralytics/settings.json'
+yolo12-A2C2f-EDFFN.yaml
+'list' object has no attribute 'tolist'
+yolo12-overlock.yaml
+'NoneType' object is not callable
+yolo12-hyper-MFM.yaml
+local variable 'threshold' referenced before assignment
+yolo12-overlock.yaml
+'NoneType' object is not callable
+yolo12-hyper-MFM.yaml
+local variable 'threshold' referenced before assignment
+yolo12-overlock.yaml
+'NoneType' object is not callable
+yolo12-hyper-MFM.yaml
+local variable 'threshold' referenced before assignment
+yolo12-GDSAFusion.yaml
+'NoneType' object is not callable
+yolo12-overlock.yaml
+'NoneType' object is not callable
+yolo12-hyper-MFM.yaml
+local variable 'threshold' referenced before assignment
+yolo12-GDSAFusion.yaml
+'NoneType' object is not callable
+yolo12-overlock.yaml
+'NoneType' object is not callable
+yolo12-hyper-MFM.yaml
+local variable 'threshold' referenced before assignment
+yolo12-C3k2-EBlock.yaml
+'list' object has no attribute 'tolist'
+yolo12-C3k2-LFEM.yaml
+'list' object has no attribute 'tolist'
+yolo12-GDSAFusion.yaml
+'NoneType' object is not callable
+yolo12-C3k2-FasterFD.yaml
+'list' object has no attribute 'tolist'
+yolo12-C3k2-SBSM.yaml
+name 'Mamba' is not defined
+yolo12-C3k2-EVS.yaml
+name 'selective_scan_fn' is not defined
+yolo12-overlock.yaml
+'NoneType' object is not callable
+yolo12-hyper-MFM.yaml
+local variable 'threshold' referenced before assignment
+yolo12-GDSAFusion.yaml
+'NoneType' object is not callable
+yolo12-C3k2-SBSM.yaml
+name 'Mamba' is not defined
+yolo12-C3k2-EVS.yaml
+name 'selective_scan_fn' is not defined
+yolo12-overlock.yaml
+'NoneType' object is not callable
+yolo12-hyper-MFM.yaml
+local variable 'threshold' referenced before assignment
+yolo12-GDSAFusion.yaml
+'NoneType' object is not callable
+yolo12-C3k2-SBSM.yaml
+name 'Mamba' is not defined
+yolo12-C3k2-EVS.yaml
+name 'selective_scan_fn' is not defined
+yolo12-overlock.yaml
+'NoneType' object is not callable
+yolo12-hyper-MFM.yaml
+local variable 'threshold' referenced before assignment
+yolo12-GDSAFusion.yaml
+'NoneType' object is not callable
+yolo12-C3k2-SBSM.yaml
+name 'Mamba' is not defined
+yolo12-C3k2-EVS.yaml
+name 'selective_scan_fn' is not defined
+yolo12-MultiScaleConv.yaml
+padding_mode must be one of {'reflect', 'replicate', 'zeros', 'circular'}, but got padding_mode='3'

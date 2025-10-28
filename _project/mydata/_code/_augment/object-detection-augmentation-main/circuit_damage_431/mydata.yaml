@@ -1,0 +1,12 @@
+path: /home/panxiang/coding/kweilx/ultralytics/_project/mydata/_code/object-detection-augmentation-main/circuit_damage_431 
+train: /home/panxiang/coding/kweilx/ultralytics/_project/mydata/_code/object-detection-augmentation-main/circuit_damage_431/images/train 
+val: /home/panxiang/coding/kweilx/ultralytics/_project/mydata/_code/object-detection-augmentation-main/circuit_damage_431/images/val 
+
+# Classes
+names:
+  0: black
+  1: damage
+  2: ink
+  3: residue
+  4: pi
+  5: circle

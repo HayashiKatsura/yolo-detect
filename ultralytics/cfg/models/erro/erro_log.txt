@@ -1,0 +1,36 @@
+yolo12-RCSOSA-mona..yaml
+CUDA out of memory. Tried to allocate 4.88 GiB. GPU 
+yolo12-RCSOSA-cgludyt.yaml
+CUDA out of memory. Tried to allocate 4.88 GiB. GPU 
+yolo12-RCSOSA-mona..yaml
+CUDA out of memory. Tried to allocate 2.44 GiB. GPU 
+yolo12-RCSOSA-cgludyt.yaml
+CUDA out of memory. Tried to allocate 2.44 GiB. GPU 
+yolo12-LSKNet-EfficientVIM_CGLU.yaml
+Unknown model (EfficientVIM_CGLU)
+yolo12-LSKNet-dbblock.yaml
+CUDA out of memory. Tried to allocate 126.00 MiB. GPU 
+yolo12-LSKNet-EfficientVIM_CGLU.yaml
+CUDA out of memory. Tried to allocate 126.00 MiB. GPU 
+yolo12-RCSOSA-mona..yaml
+CUDA out of memory. Tried to allocate 4.88 GiB. GPU 
+yolo12-convnextv2-FAT.yaml
+shape '[128, 16, 5, 8, 5, 8]' is invalid for input of size 3612672
+yolo12-convnextv2-FAT.yaml
+shape '[128, 16, 5, 8, 5, 8]' is invalid for input of size 3612672
+yolo12-convnextv2-SAVSS.yaml
+name 'selective_scan_fn' is not defined
+yolo12-convnextv2-mish-MambaOutx4.yaml
+CUDA out of memory. Tried to allocate 250.00 MiB. GPU 
+yolo12-convnextv2-HybridAttention-MambaOutx4.yaml
+name 'math' is not defined
+yolo12-convnextv2-HybridAttention-MambaOutx4.yaml
+'NoneType' object has no attribute 'fill_'
+yolo12-convnextv2-HybridAttention-MambaOutx4.yaml
+'NoneType' object has no attribute 'fill_'
+yolo12-convnextv2-Ghost-MambaOutx4.yaml
+'NoneType' object has no attribute 'fill_'
+yolo12-convnextv2-MambaOutx4.yaml
+'ConvNeXtV2_MS' object has no attribute 'channel'
+yolo12-convnextv2-MambaOutx4.yaml
+'ConvNeXtV2_MS' object has no attribute 'channel'
