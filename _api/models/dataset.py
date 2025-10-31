@@ -79,6 +79,10 @@ class Dataset(SQLModel, table=True):
     )
     
     def to_dict(self):
+        def datetime_to_str(dt):
+            if isinstance(dt, datetime):
+                return dt.strftime("%Y-%m-%d %H:%M:%S")  
+            return dt 
         return {
             "id": self.id,
             "name": self.name,
@@ -88,5 +92,15 @@ class Dataset(SQLModel, table=True):
             "images_dir": self.images_dir,
             "labels_dir": self.labels_dir,
             "train_counts": self.train_counts,
-            "last_train_counts": self.last_train_count
+            "last_train_counts": self.last_train_count,
+            "val_counts": self.val_counts,
+            "last_val_counts": self.last_val_counts,
+            "test_counts": self.test_counts,
+            "last_test_counts": self.last_test_counts,
+            "size_bytes": self.size_bytes,
+            "remark": self.remark,
+            "deleted_at" : datetime_to_str(self.deleted_at) if self.deleted_at else None,
+            "created_at": datetime_to_str(self.created_at),
+            "updated_at": datetime_to_str(self.updated_at)
+            
         }

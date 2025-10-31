@@ -10,8 +10,13 @@ import torch
 import gc
 import yaml
 import os
-# os.environ['CUDA_LAUNCH_BLOCKING']="1"
-# os.environ['TORCH_USE_CUDA_DSA'] = "1"
+from _api.configuration.DatabaseSession import engine as SQL_ENGINE
+from _api.models.file import File as FileObject
+import time
+from _api.configuration.RedisConfig import redis_config
+from sqlmodel import Session,select
+import json
+
 
 from loguru import logger as lgu
 lgu.remove()
@@ -20,21 +25,19 @@ lgu_fmt = "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | " \
       "<level>{level: <8}</level> | " \
       "<cyan>{message}</cyan>"
 
-def standard_train(config_yaml_path: str,
-                   data_yaml: str,
+def standard_train(config_yaml_path: str = None,
+                   data_yaml: str = None ,
                    weight_path: str= None,
-                   pr_name: str = '',
                    desc: str ='',
                    save_path:str = None,
                    batch_size:int = 8,
-                   epochs:int = 500,
+                   epochs:int = 1,
                    image_size:int = 640,
                    learning_rate:float = 0.01,
                    device:int|str = 0,
                    freeze:list = None,
                    rtd_yolo:str = 'yolo',
-                   web_params:dict = None,
-                   session_id:str = '123')->str:
+                   web_params:dict = None)->str:
     """
     默认跑在yolov8n上
 
@@ -60,7 +63,8 @@ def standard_train(config_yaml_path: str,
     Returns:
         str: 训练结果保存路径
     """
-    if web_params:
+    time_stamp = str(time.strftime('%Y%m%d%H%M', time.localtime()))
+    if web_params: # for web
         model_path_map = {
             "yolov8": str(os.path.join(PJ_ROOT,"ultralytics/cfg/models/8/yolov8.yaml")),
             "yolov11": str(os.path.join(PJ_ROOT,"ultralytics/cfg/models/11/yolo11.yaml")),
@@ -68,31 +72,38 @@ def standard_train(config_yaml_path: str,
             "chipsyolo": str(os.path.join(PJ_ROOT,"ultralytics/cfg/models/12/yolo12.yaml")),
         }
         
-        for item in ["yolov8", "yolov11", "yolov12","chipsyolo"]:
-            if item in str(config_yaml_path).lower():
-                config_yaml_path = model_path_map[item]
+        dataset_id = int(web_params['dataset_id'])
+        train_name =  web_params.get("name",f"{time_stamp}")
+        modelVersion = web_params.get('model','yolov8').lower()
+        rtd_yolo = 'yolo' if str(modelVersion).find('yolo')!=-1 else 'rtdetr'
+        device = (f"cuda:0" if torch.cuda.is_available() else "cpu") or (f"cuda:0" if str(web_params.get('device','cpu')).lower() == "gpu" else "cpu")
+        image_size = int(web_params.get('image_size',640))
+        batch_size =int( web_params.get('batch_size',8))
+        learning_rate = float(web_params.get('learning_rate',0.01))
+        epochs = int(web_params.get('epochs',1))
+        session_id = f"{os.path.basename(save_path)}"
         
+        with Session(SQL_ENGINE) as session:
+            query = select(FileObject).where(FileObject.id == dataset_id)
+            dataset_data = session.exec(query).first()
+            if not dataset_data:
+                raise ValueError(f"数据集文件ID {dataset_id} 不存在")
+            dataset_data = dataset_data.remark
+        data_yaml = dataset_data['yaml_path']
+        config_yaml_path = model_path_map.get(modelVersion,model_path_map['yolov8'])  
+
+    else: # for local
         with open(data_yaml, 'r') as f:
             data = yaml.safe_load(f)
         train_path = data.get('train')
         val_path = data.get('val')
-        NAME = web_params['name']
-        
         desc = f"{desc}_" if desc else ''
-    else:
-        pr_name = f"Train{len([f for f in os.listdir(train_path)if str(f).lower().endswith(('.jpg','.png','.jpeg'))])}_Val{len([f for f in os.listdir(val_path)if str(f).lower().endswith(('.jpg','.png','.jpeg'))])}"
-        PR_NAME = f"{desc}{pr_name}"
-        TIME_STAMP = str(time.strftime("%Y%m%d%H%M", time.localtime()))
-        NAME = f"{TIME_STAMP}_{PR_NAME}"
-        
-    
-    BATCH_SIZE = batch_size or 8
-    EPOCHS = epochs or 1
-    IMAGE_SIZE = image_size or 640
-    LEARING_RATE = learning_rate or 0.01
-    DEVICE = device or 0
-    DEVICE = (f"cuda:0" if torch.cuda.is_available() else "cpu") or (f"cuda:0" if str(DEVICE).lower() == "gpu" else "cpu")
-    FREEZE = freeze or None
+        train_name = f"{desc}Train{len([f for f in os.listdir(train_path)if str(f).lower().endswith(('.jpg','.png','.jpeg'))])}_Val{len([f for f in os.listdir(val_path)if str(f).lower().endswith(('.jpg','.png','.jpeg'))])}"
+        train_name = f"{time_stamp}-{train_name}"
+        save_path = os.path.join(save_path, train_name)
+
+    os.makedirs(save_path, exist_ok=True)
+      
     if session_id:
         session_id = os.path.join(PJ_ROOT,"_api/logs/train",session_id)
         lgu.add(f'{session_id}.log', format=lgu_fmt, level="INFO")
@@ -103,25 +114,26 @@ def standard_train(config_yaml_path: str,
     else:
         model = RTDETR(config_yaml_path).load(weight_path) if weight_path else RTDETR(config_yaml_path)
     results = model.train(
-        
-            data=data_yaml, 
-            batch=BATCH_SIZE,
-            device=DEVICE,
-            project=save_path,
-            name=NAME,
-            epochs=EPOCHS, 
-            imgsz=IMAGE_SIZE,
-            cos_lr=True,
-            lr0=LEARING_RATE,
-            freeze=FREEZE,
-            workers = 0,
-            session_id = session_id
-            # amp = False
-                      
+                data=data_yaml, 
+                batch=batch_size or 8,
+                device=device,
+                project=save_path,
+                epochs=epochs or 1, 
+                imgsz=image_size or 640,
+                cos_lr=True,
+                lr0=learning_rate or 0.01,
+                freeze=freeze or None,
+                workers = 0,
+                session_id = session_id
+                # amp = False
     )
-    # if DEVICE!= "cpu":
-    #     torch.cuda.empty_cache()
-    #     gc.collect()
+    if device != "cpu":
+        torch.cuda.empty_cache()
+    
+    if web_params:
+        for item in os.listdir(weights_dir:=os.path.join(save_path,'train/weights')):
+            os.rename(os.path.join(weights_dir,item),os.path.join(weights_dir,f"{train_name}_{item}")) if str(item).endswith('.pt') else None
+
     
     lgu.info(f"训练结果保存到 {results.save_dir._str}")
     return results.save_dir._str

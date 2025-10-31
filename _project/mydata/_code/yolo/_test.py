@@ -1,7 +1,7 @@
 import os
-project_path = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+PJ_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 import sys
-sys.path.append(project_path)
+sys.path.append(PJ_ROOT)
 
 from ultralytics import YOLO
 from ultralytics import RTDETR
@@ -12,16 +12,26 @@ import gc
 import copy
 from tqdm import tqdm
 import cv2
+from uuid import uuid4
+import time
 
 from _project.mydata._code._utils.VideoDetectData import frame_detect_csv
+from _api._utils.ImagestransferComponent.FromLocalImageFiles import TransferLocalImageFiles
+from sqlmodel import Session,select
+from _api.models.file import File as FileObject
+from _api.configuration.DatabaseSession import engine as SQL_ENGINE
+from _api.configuration.RedisConfig import redis_config
+
+from datetime import datetime
+import json
 
 def standard_test(model_path:str,
-                  test_image_path:str,
+                  test_image_path:str|dict,
                   save_folder:str = None,
                   conf:float=0.25,
                   batch_size:int=32,
                   record:bool=False,
-                  only_one:bool = True,
+                  only_one:bool = False,
                   save_detections:bool = False,
                   save_no_detections:bool = False,
                   rtd_yolo:str = 'yolo')->None:
@@ -38,7 +48,6 @@ def standard_test(model_path:str,
     save_detections: 是否保存检测结果图片
     save_no_detections: 是否保存无检测结果图片
     """
-    
 
     model_folder = None # 训练数据文件夹
     if str(model_path).endswith('.pt'):
@@ -50,45 +59,171 @@ def standard_test(model_path:str,
     # save_folder = os.path.join(save_folder, f'predict_results_conf{conf}')
     model = YOLO(model_path) if rtd_yolo == 'yolo' else RTDETR(model_path)
     files_list = []
-    if os.path.isfile(test_image_path) and str(test_image_path).lower().endswith(('.jpg', '.jpeg', '.png')):
-        files_list.append(test_image_path)
-    elif os.path.isdir(test_image_path):
-        for item in os.listdir(test_image_path):
-            if os.path.isfile(os.path.join(test_image_path,item)) and str(item).lower().endswith(('.jpg', '.jpeg', '.png')):
-                files_list.append(os.path.join(test_image_path,item))
-    else:
-        pass  
+    if isinstance(test_image_path, str):
+        if os.path.isfile(test_image_path) and str(test_image_path).lower().endswith(('.jpg', '.jpeg', '.png')):
+            files_list.append(test_image_path)
+        elif os.path.isdir(test_image_path):
+            for item in os.listdir(test_image_path):
+                if os.path.isfile(os.path.join(test_image_path,item)) and str(item).lower().endswith(('.jpg', '.jpeg', '.png')):
+                    files_list.append(os.path.join(test_image_path,item))
+        else:
+            pass  
+    elif isinstance(test_image_path, dict):
+        files_list = test_image_path
     
+    prediciton_results = []
     # 批量预测
-    for i in tqdm(iterable=range(0, len(files_list), batch_size), desc=f"测试文件{os.path.basename(test_image_path)} ，模型{os.path.basename(model_folder)}"):
-        batch_files = files_list[i:i+batch_size]
-        batch_paths = [f for f in batch_files]
+    if isinstance(files_list, list): # for local
+        for i in tqdm(iterable=range(0, len(files_list), batch_size), desc=f"测试文件{os.path.basename(test_image_path)} ，模型{os.path.basename(model_folder)}"):
+            batch_files = files_list[i:i+batch_size]
+            batch_paths = [f for f in batch_files]
 
-        results = model.predict(batch_paths, conf=conf)
-        os.makedirs(save_folder,exist_ok=True)
-        for result in results:
-            boxes = result.boxes 
-            file_path = str(result.path)
-            file_name = os.path.basename(file_path)
+            results = model.predict(batch_paths, conf=conf)
+            os.makedirs(save_folder,exist_ok=True)
+            for result in results:
+                boxes = result.boxes 
+                file_path = str(result.path)
+                file_name = os.path.basename(file_path)
 
-            if len(boxes)!= 0:
-                if record:
+                if len(boxes)!= 0:
+                    if record:
+                        for _box in boxes:
+                            _cls = int(_box.cls.tolist()[0])
+                            _xywhn = _box.xywhn.tolist()[0]
+                            with open(os.path.join(save_folder,f"{str(file_name).split('.')[0]}.txt"), mode='a') as f:
+                                f.write(f'{_cls} {_xywhn[0]} {_xywhn[1]} {_xywhn[2]} {_xywhn[3]} {round(float(boxes[0].conf.tolist()[0]),2)}\n')
+                    if save_detections:
+                        result.save(os.path.join(save_folder, file_name))
+                else:
+                    if save_no_detections:
+                        result.save(os.path.join(save_folder, file_name))
+    
+    elif isinstance(files_list, dict):  # for web    
+        time_stamp =str(time.strftime("%Y%m%d%H%M", time.localtime()))
+        random_id = str(uuid4().hex)
+        dict_items = list(files_list.items())
+        for i in tqdm(iterable=range(0, len(dict_items), batch_size), 
+                    desc=f"测试文件 ,模型{os.path.basename(model_folder)}"):
+            batch_items = dict_items[i:i+batch_size]
+            batch_paths = [path for file_id, path in batch_items]
+            
+            # 创建路径到file_id的映射
+            path_to_id = {path: file_id for file_id, path in batch_items}
+            
+            results = model.predict(batch_paths, conf=conf)
+            save_folder = os.path.join(PJ_ROOT, '_api/data/prediction', f'{time_stamp}-{random_id}')
+            os.makedirs(save_folder, exist_ok=True)
+            
+            for result in results:
+                boxes = result.boxes 
+                file_path = str(result.path)
+                
+                file_id = path_to_id[file_path]
+                
+                _name,_ext = os.path.splitext(os.path.basename(file_path))
+                file_name = f'{_name}_detected{_ext}'
+                txt_name = f'{_name}_detected.txt'
+
+                if len(boxes) != 0:
+                    height, width = boxes.orig_shape
+                    prediciton_data = []
                     for _box in boxes:
                         _cls = int(_box.cls.tolist()[0])
                         _xywhn = _box.xywhn.tolist()[0]
-                        with open(os.path.join(save_folder,f"{str(file_name).split('.')[0]}.txt"), mode='a') as f:
-                            f.write(f'{_cls} {_xywhn[0]} {_xywhn[1]} {_xywhn[2]} {_xywhn[3]} {round(float(boxes[0].conf.tolist()[0]),2)}\n')
-                if save_detections:
-                    result.save(os.path.join(save_folder, file_name))
-            else:
-                if save_no_detections:
-                    result.save(os.path.join(save_folder, file_name))
+                        _x = round((_xywhn[0]),2)
+                        _y = round((_xywhn[1]),2)
+                        _w = round((_xywhn[2]),2)
+                        _h = round((_xywhn[3]),2)
+                        
+                        # YOLO 转为左上角坐标
+                        x1 = int((float(_x) - float(_w) / 2) * width)
+                        y1 = int((float(_y) - float(_h) / 2) * height)
+                        x2 = int((float(_x) + float(_w) / 2) * width)
+                        y2 = int((float(_y) + float(_h) / 2) * height)                        
+                        
+                        
+                        prediciton_data.append(
+                            {
+                                'class':_cls,
+                                'x': _x,
+                                'y': _y,
+                                'w': _w,
+                                'h': _h,
+                                'conf': round(float(_box.conf.tolist()[0]),2),
+                                'predicted_area': abs(x1-x2)*abs(y1-y2),
+                                'yolo_coord': [_x, _y, _w, _h],
+                                'image_coord': [x1, y1, x2, y2],
+                                'image_size': [height, width]
+                            }
+                        )
+                        with open(os.path.join(save_folder, txt_name), mode='a') as f:
+                            f.write(f'{_cls} {_xywhn[0]} {_xywhn[1]} {_xywhn[2]} {_xywhn[3]} {round(float(_box.conf.tolist()[0]), 2)}\n')
+  
+                    detected_image = os.path.join(save_folder, file_name)
+                    result.save(detected_image)
+                    prediciton_results.append(
+                        {
+                            'file_id': file_id,
+                            'file_name': os.path.basename(file_path),
+                            'count': len(result.boxes),
+                            'prediction':prediciton_data,
+                            # 'images':f"data:image/png;base64,{TransferLocalImageFiles(detected_image).toBase64()}"
+                            'images':detected_image,
+                            'labels':os.path.join(save_folder, txt_name),
+                            'timestamp':str(time.strftime("%Y%m%d%H%M", time.localtime()))
+                        }
+                    )   
+                    
+                else:
+                     prediciton_results.append(
+                            {
+                                'file_id': file_id,
+                                'file_name': os.path.basename(file_path),
+                                'count': 0,
+                                'timestamp':str(time.strftime("%Y%m%d%H%M", time.localtime()))
+                            }
+                        )
+        
+        # 写入数据库
+        with Session(SQL_ENGINE) as session:
+            for result in prediciton_results:
+                query = select(FileObject).where(FileObject.id == result['file_id'])
+                file_data = session.exec(query).first()
 
-
+                if file_data:
+                    if not file_data.media_annotations:
+                        file_data.media_annotations = [result]
+                    else:
+                        file_data.media_annotations = [result] + file_data.media_annotations 
+                    file_data.updated_at = datetime.utcnow()
+            session.commit()
+        
+        # 缓存结果
+        redis_client = redis_config.get_client()
+        redis_key = f"prediction:{datetime.now().date()}"
+        cached_data = redis_client.get(redis_key)
+        if cached_data:
+            cached_data = json.loads(cached_data)
+            for result in prediciton_results:
+                file_id = result['file_id']
+                existing_entry = next((entry for entry in cached_data if entry['file_id'] == file_id), None)
+                existing_entry.update(result) if existing_entry else cached_data.append(result)
+        else:
+            cached_data = prediciton_results
+        # redis_client.setex(redis_key,3600*24, json.dumps(cached_data))
+        cursor = 0
+        while True:
+            cursor, keys = redis_client.scan(cursor, match=f"{redis_key}*")
+            for key in keys:
+                redis_client.setex(key,3600*24, json.dumps(cached_data))
+            if cursor == 0: 
+                break
+                    
     if only_one:
         torch.cuda.empty_cache()      
         gc.collect()   
 
+    return prediciton_results
 def standard_test_video(model_path:str,
                   test_image_path:str,
                   save_folder:str = None,

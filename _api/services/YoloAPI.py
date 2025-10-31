@@ -44,8 +44,11 @@ from fastapi import APIRouter, Query, HTTPException
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 import traceback
-from typing import List, Dict
-
+from typing import List, Dict, Any, Optional
+from _api.configuration.RedisConfig import redis_config
+import json
+from datetime import datetime
+import psutil
 
 
 class YoloAPI:
@@ -53,6 +56,8 @@ class YoloAPI:
         self.time_stamp =str(time.strftime("%Y%m%d%H%M", time.localtime()))
         self.random_id = str(uuid4().hex)
         self.max_workers = 4
+        self.redis_client = redis_config.get_client()
+
         
     def _get_storage_paths(self, weights_ids: List[int]) -> Dict[int, str]:
         """
@@ -67,43 +72,133 @@ class YoloAPI:
         return {row[0]: row[1] for row in result}
         
     
-    def _pre_train(self,train_params):
+    def exec_startTraining(self,train_params):
         """
         启动子线程
         """
-        train_params.update(
-            {
-                'web_params':{
-                    'name':f'{self.time_stamp}-{self.random_id}',
-                }
-            }
-        )
-        with Session(SQL_ENGINE) as session:
-                file = session.get(FileObject, self.file_id)
-                if not file:
-                    raise FileNotFoundError(f"文件不存在")
-                    
-                dataset_info = '' # TODO
-        
-        
+        save_path = os.path.join(PJ_ROOT,'_api/data/train',f"{str(time.strftime('%Y%m%d%H%M', time.localtime()))}-{train_params['name']}")    
         try:
-            process = multiprocessing.Process(target=standard_train, args=(train_params,))
+            process = multiprocessing.Process(
+                target=standard_train, 
+                kwargs={
+                    'web_params': train_params,
+                    'save_path': save_path
+                }
+            )
             process.start()
             msg = 'ok'
+            code = 200
         except Exception as e :
             msg = str(e)
-        return train_params.update({'process_id':process.pid}).update({'msg':msg})
+            code = 500
+            save_path = None
         
-    
+        self.redis_client.setex(f"train-task:{datetime.now().date()}:{process.pid}", 3600*2, save_path)    
+        train_params.update(
+            {
+                'process_id':process.pid,
+                'msg':msg,
+                'save_path':save_path,
+                'code':code
+            }
+        )
+        return train_params
+        
+    def exec_stopTraining(self,task_id):
+        pid = int(task_id)
+        code = 500
+        try:
+            process = psutil.Process(pid)
+            info = {
+                "pid": pid,
+                "name": process.name(),
+                "status": process.status(),
+                "create_time": datetime.fromtimestamp(process.create_time()).isoformat()
+            }
+
+            # 终止进程
+            process.terminate()
+            try:
+                process.wait(timeout=5)  # 等待最多5秒
+            except psutil.TimeoutExpired:
+                process.kill()  # 强制结束
+
+            code = 200
+            return {"msg": 'ok', "info": info, "code":code}
+        
+        except psutil.NoSuchProcess:
+            return {"msg": f"无{task_id}训练任务", "code":404}
+        except psutil.AccessDenied:
+            return {"msg": f"终止{task_id}时，权限域被拒绝", "code":code}
+        except Exception as e:
+            return {"msg": str(e), "code":code}
+        
+    def exec_showTraining(self, task_id: str, line_no: Optional[int] = None) -> Dict[str, Any]:
+        """
+        读取训练日志CSV并分页返回：
+        - 未传 line_no：返回全部
+        - 传了 line_no：返回从 line_no+1 到末尾
+        - 若 line_no >= 最大行索引：仍返回最后一行，并删除 Redis key（仅触发一次）
+        """
+        redis_key = f"train-task:{datetime.now().date()}:{task_id}"
+        save_path = self.redis_client.get(redis_key)
+        if not save_path:
+            return {"code": 404, "msg": f"无{task_id}训练任务"}
+
+        if isinstance(save_path, str) and len(save_path) >= 2 and save_path[0] == save_path[-1] and save_path[0] in ('"', "'"):
+            save_path = save_path[1:-1]
+
+        log_path = os.path.join(save_path, "train", "results.csv")
+        if not os.path.exists(log_path):
+            return {"code": 404, "msg": f"无{task_id}训练任务，或训练日志未生成"}
+
+        try:
+            with open(log_path, "r", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                all_rows: List[Dict[str, Any]] = list(reader)
+
+            total_lines = len(all_rows)
+            if total_lines == 0:
+                return {"code": 204, "msg": "训练日志未生成", "task_id": task_id}
+
+            # 计算起始行
+            if line_no is None:
+                start_idx = 0
+            else:
+                if line_no < 0:
+                    line_no = 0
+                # 常规情况：从 line_no+1 开始
+                start_idx = line_no + 1
+                # 边界：如果已经到达或超过最后一行索引，则只返回最后一行
+                if start_idx >= total_lines:
+                    start_idx = total_lines - 1
+                    # 删除 Redis key（只会在到达末尾时触发一次）
+                    self.redis_client.delete(redis_key)
+
+            data = all_rows[start_idx:]  # 当到达末尾时，这里只会是最后一行
+
+            return {
+                "code": 200,
+                "msg": "ok" if start_idx < total_lines - 1 else "reached end, key deleted",
+                "task_id": task_id,
+                "total_lines": total_lines,
+                "returned_lines": len(data),
+                "start_line": start_idx, 
+                "data": data
+            }
+
+        except Exception as e:
+            return {"code": 500, "msg": str(e), "task_id": task_id}
+
     
 
-    def validation(self, dataset_id:int,weights_ids: List[int]) -> list:
+    def exec_validation(self, dataset_id:int,conf:str|float,weights_ids: List[int]) -> list:
         """
         并行验证多个权重文件，返回每个文件的验证结果
         - 先查询数据库获取存储路径
         - 使用线程池并发验证多个文件
         """
-        # 1. 获取存储路径（通过一次 IN 查询）
+        # 获取存储路径（通过一次 IN 查询）
         with Session(SQL_ENGINE) as session:
             weights_query = select(FileObject.id, FileObject.storage_path).where(FileObject.id.in_(weights_ids))
             yaml_query = select(FileObject.id, FileObject.remark['yaml_path']).where(FileObject.id == dataset_id)
@@ -113,7 +208,7 @@ class YoloAPI:
         # 将查询结果转换为字典：{weight_id -> storage_path}
         weight_paths = {row[0]: row[1] for row in weights_result if row[0]!=dataset_id}
 
-        # 2. 并行验证文件
+        # 验证文件
         results = []  # 用于存储验证结果
         with ThreadPoolExecutor(max_workers=min(self.max_workers, len(weight_paths))) as executor:
             futures = {}
@@ -132,6 +227,7 @@ class YoloAPI:
                         'model': weight_path,
                         'yaml_data': yaml_result[1],
                         'weight_id': weight_id,
+                        'conf_list':[float(conf)]
                     },
                     save_folder=save_folder
                 )
@@ -145,895 +241,68 @@ class YoloAPI:
                     results.append({
                         'weight_id': weight_id,
                         'result': result,
-                        'success': True
+                        'msg': 'ok'
                     })
+                                        
+                    self.redis_client.setex(f"validation:weight-id:{weight_id}", 3600*2, json.dumps(result))    
+                        
                 except Exception as e:
                     print(f"Weight {weight_id} 执行失败: {e}")
                     results.append({
                         'weight_id': weight_id,
-                        'error': str(e),
-                        'success': False
+                        'msg': f'failed,{str(e)}'
                     })
 
             
 
         return results
 
+    def exec_prediction(self, weight_id:int,files_ids: List[int]) -> list:
+        """
+        """
+        MAX_BATCH = 100
+        # 获取存储路径（通过一次 IN 查询）
+        with Session(SQL_ENGINE) as session:
+            files_query = select(FileObject.id, FileObject.storage_path).where(FileObject.id.in_(files_ids))
+            weight_query = select(FileObject.id, FileObject.storage_path).where(FileObject.id == weight_id)
+            files_result = session.execute(files_query).fetchall()
+            weight_result = session.execute(weight_query).first()
 
+        files_paths = {row[0]: row[1] for row in files_result}
 
-            
-            
-# with futures.ThreadPoolExecutor（ as executor：
-# results =executor.map（download_img, range（10））
-# for result in results：
-# print（result）      
-            
+        # 预测文件
+        results = []  # 用于存储验证结果
+        if len(files_paths)<=MAX_BATCH:
+            results = standard_test(
+                model_path=weight_result[1],
+                test_image_path = files_paths
+            )
+        else:
+            batch_files = [list(files_paths.items())[i:i+MAX_BATCH] for i in range(0, len(files_paths), MAX_BATCH)]
         
-    
+            with ThreadPoolExecutor(max_workers=min(self.max_workers, len(batch_files))) as executor:
+                futures = {}
 
-# class YoloAPI:
-#     def __init__(self,weight_id=None,conf=0.25,camera=False):
-#         self.log_save_path = os.path.join(PJ_ROOT, 'data', 'logs')
-#         self.time_stamp =str(time.strftime("%Y%m%d%H%M", time.localtime()))
-#         self.weight_id = weight_id
-#         self.camera = camera
-#         if self.camera and self.camera!='null':
-#             self.camera = True
-#         if self.weight_id:
-#             # self.weight_path = files_info("file_id", 
-#             #                               self.weight_id,
-#             #                               record_path=files_record_mapping()[str(FilesType.weights)][1]).get('file_path',None)
-#             self.weight_path = WeightTable.query.filter_by(file_id=self.weight_id).first().file_path
-#         else:
-#             self.weight_path = None
-#         self.conf = conf
-#         self.temp_folder = os.path.join(PJ_ROOT, 'data', 'temp') # 存放临时文件
-#         os.makedirs(self.temp_folder, exist_ok=True)
-      
-        
-#     @handle_db_error
-#     def detect_file(self,image_id,batch_size=32,save_folder=None,record=True):
-        
-#         # 临时文件夹
-#         temp_folder = os.path.join(self.temp_folder, f"temp-{self.time_stamp}-{str(uuid4())[20:]}")
-#         os.makedirs(temp_folder, exist_ok=True)
-        
-#         if str(image_id).find(',')!=-1: # ->多id
-#             file_id_path_map = {}
-            
-#             image_id_list = image_id.split(',')
-#             for item_id in image_id_list:
-#                 # current_file_path = files_info("file_id",
-#                 #                           str(item_id),
-#                 #                           record_path=files_record_mapping()[str(FilesType.cameras)][1])['file_path']
-#                 current_file_path = FileTable.query.filter_by(file_id=str(item_id)).first().file_path
-                
-                
-#                 if os.path.isfile(current_file_path):
-#                     file_name = os.path.basename(current_file_path)
-#                     temp_file_path = os.path.join(temp_folder, file_name)
-#                     shutil.copy(current_file_path, temp_file_path)
-#                     file_id_path_map.update({str(file_name):str(item_id)})
-                    
-#             image_path = temp_folder
-        
-#         else: # ->单id
-#             file_id_path_map = {}
-            
-#             if str(image_id).find('folder')!=-1: # ->文件夹
-#                 # image_path = files_info("file_folder_id",
-#                 #                         image_id,
-#                 #                         record_path=files_record_mapping()[str(FilesType.images)][1]).get('file_folder_path',None)
-                
-#                 # folder_info = FileTable.query.with_entities(FileTable.folder_path).all()
-#                 folder_info = FileTable.query.with_entities(FileTable.file_id,FileTable.file_path,FileTable.folder_path).all()
-#                 for item in folder_info:
-#                     _file_id, _file_path, _folder_path = item
-#                     if str(_folder_path).find(image_id)!=-1:
-#                         image_path = _folder_path
-#                         file_id_path_map.update(
-#                             {str(os.path.basename(_file_path)):str(_file_id)}
-#                         )
-        
-                
-#             else: # ->文件 
-#                 # image_path = files_info("file_id", 
-#                 #                         image_id,
-#                 #                         record_path=files_record_mapping()[str(FilesType.images)][1]).get('file_path',None)
-#                 image_path = FileTable.query.filter_by(file_id=image_id).first().file_path
-                
-        
-#         save_folder = os.path.join(PJ_ROOT, 'data', 'predict',f"predict-{self.time_stamp}-{str(uuid4())[20:]}")
-#         os.makedirs(save_folder, exist_ok=True)
-        
-#         # 视频类型的文件
-#         if os.path.isfile(image_path):
-#             if os.path.splitext(image_path)[1] in ['.mp4','.avi','.mkv']:
-#                 detect_video_path,csv_path = standard_test_video(
-#                     model_path = self.weight_path,
-#                     test_image_path = image_path,
-#                     save_folder = save_folder,
-#                 )
-                
-#                 # 检测结果写入数据库
-#                 detected_id= f'detect-{self.time_stamp}-{str(uuid4())}' # 检测结果id
-#                 _video = FileTable.query.filter_by(file_id=image_id).first()
-#                 if _video:
-#                     _video.is_detected = str(detected_id)
-                
-#                 from datetime import datetime,timezone
-#                 _detections = DetectionTable(
-#                             file_id = image_id,
-#                             weight_id = self.weight_id,
-#                             details = {
-#                                 "detect_image_path":detect_video_path,
-#                                 "detect_txt_path":csv_path
-#                                 }
-#                             )
-#                 db.session.add(_detections)
-#                 db.session.commit()
-#                 return {"detect_id":detected_id}
-            
-#         elif os.path.isdir(image_path):# TODO
-#             pass
-        
-        
-#         # 一般意义上的图像文件
-#         standard_test(
-#             model_path=self.weight_path,
-#             test_image_path=image_path,
-#             conf=self.conf,
-#             batch_size=batch_size,
-#             save_folder=save_folder,
-#             save_detections=True,
-#             record=True,
-#         )
-#         success = False
-#         results = []
-        
-#         if os.path.isdir(image_path):
-#             image_files = glob.glob(f'{save_folder}/*.jpg') + glob.glob(f'{save_folder}/*.png') + glob.glob(f'{save_folder}/*.jpeg')
-#             for image_file in image_files:
-#                 success = False
-#                 try:
-#                     detect_image_base64 = ''
-#                     height, width = cv2.imread(image_file).shape[:2]
-#                     detect_image_path = image_file
-#                     # detect_image_id= f'image-{self.time_stamp}-{str(uuid4())}' # 检测输出的图像id
-   
-#                     detect_image_base64 =  f'data:image/png;base64,{TransferLocalImageFiles(detect_image_path).toBase64()}',
-#                     detect_image_base64 = detect_image_base64[0] if isinstance(detect_image_base64,tuple) else detect_image_base64
-                    
-#                     detect_txt_path = f'{os.path.splitext(detect_image_path)[0]}.txt'
-#                     # detect_txt_id= f'txt-{self.time_stamp}-{str(uuid4())}'
-                    
-#                     # files_info("file_id", 
-#                     #         file_id_path_map[str(os.path.basename(image_file))], 
-#                     #         "is_detected", 
-#                     #         f'{detect_image_id},{detect_txt_id}',
-#                     #         record_path=files_record_mapping()[str(FilesType.cameras) if self.camera else str(FilesType.images)][1])
-                    
-#                     # is_detected_map = {detect_image_id:detect_image_path,detect_txt_id:detect_txt_path}
-#                     # record_msg = \
-#                     #         {
-#                     #             'file_id': file_id_path_map[str(os.path.basename(image_file))],
-#                     #             'weight_id':self.weight_id,
-#                     #             'is_detected':is_detected_map,
-#                     #             'file_create_time':str(self.time_stamp)
-#                     #         }
-#                     # data_record(record_msg,fieldnames=table_2(),save_path=files_record_mapping()[str(FilesType.detect)][1])
-                    
-#                     detected_id= f'detect-{self.time_stamp}-{str(uuid4())}' # 检测结果id
-            
-#                     _image = FileTable.query.filter_by(file_id=file_id_path_map[str(os.path.basename(image_file))]).first()
-#                     if _image:
-#                         _image.is_detected = str(detected_id)
-                        
-#                     _detections = DetectionTable(
-#                                 file_id = str(file_id_path_map[str(os.path.basename(image_file))]),
-#                                 weight_id = self.weight_id,
-#                                 details = {"detect_image_path":detect_image_path,"detect_txt_path":detect_txt_path})
-#                     db.session.add(_detections)
-#                     db.session.commit()
-                            
-                    
-#                     with open(detect_txt_path, 'r') as f:
-#                         lines = f.readlines()
-#                         for line in lines:
-#                             _cls,_x,_y,_w,_h,_conf = line.strip().split(' ')
-                            
-#                             # YOLO 转为左上角坐标
-#                             x1 = int((float(_x) - float(_w) / 2) * width)
-#                             y1 = int((float(_y) - float(_h) / 2) * height)
-#                             x2 = int((float(_x) + float(_w) / 2) * width)
-#                             y2 = int((float(_y) + float(_h) / 2) * height)
-#                             # 计算面积
-#                             detect_area = abs(x1-x2)*abs(y1-y2)
-#                             results.append(
-#                                 {
-#                                     'file_name':str(os.path.basename(detect_image_path)),
-#                                     'cls':_cls,
-#                                     'conf':_conf,
-#                                     'yolo_coord':f'(x:{round(float(_x),2)},y:{round(float(_y),2)},w:{round(float(_w),2)},h:{round(float(_h),2)})',
-#                                     'detect_coord':f'(x1:{x1},y1:{y1},x2:{x2},y2:{y2})',
-#                                     'detect_area':detect_area,
-#                                     'image_size':f'height:{height},width:{width}',
-#                                     'detect_image_base64':detect_image_base64,
-#                                     'file_path':str(os.path.dirname(detect_image_path))
-#                                 }
-#                             )
-                        
-#                     success = True
-#                 except Exception as e:
-#                     pass     
-#                 # if success:
-#                 #     files_info("file_path", 
-#                 #                os.path.join(image_path, 
-#                 #                             os.path.basename(image_file)), 
-#                 #                "is_detected", 
-#                 #                f'{detect_image_id},{detect_txt_id}',
-#                 #                record_path=files_record_mapping()[str(FilesType.cameras) if self.camera else str(FilesType.images)][1])
-            
-            
-#             return results[0]     
-          
-#         elif os.path.isfile(image_path):
-#             # 当为单个文件时
-#             detect_image_base64 = ''
-#             image = cv2.imread(image_path)
-#             height, width = image.shape[:2]
-#             results = []
-#             try:
-#                 image_files = glob.glob(f'{save_folder}/*.jpg') + glob.glob(f'{save_folder}/*.png') + glob.glob(f'{save_folder}/*.jpeg')
-#                 detect_image_path = image_files[0]
-#                 # detect_image_id= f'image-{self.time_stamp}-{str(uuid4())}'
-                
-#                 detect_image_base64 =  f'data:image/png;base64,{TransferLocalImageFiles(detect_image_path).toBase64()}',
-#                 detect_image_base64 = detect_image_base64[0] if isinstance(detect_image_base64,tuple) else detect_image_base64
-                
-                
-#                 detect_txt_path = f'{os.path.splitext(detect_image_path)[0]}.txt'
-#                 # detect_txt_id= f'txt-{self.time_stamp}-{str(uuid4())}'                
-                
-#                 with open(detect_txt_path, 'r') as f:
-#                     lines = f.readlines()
-#                     for line in lines:
-#                         _cls,_x,_y,_w,_h,_conf = line.strip().split(' ')
-                        
-#                         # YOLO 转为左上角坐标
-#                         x1 = int((float(_x) - float(_w) / 2) * width)
-#                         y1 = int((float(_y) - float(_h) / 2) * height)
-#                         x2 = int((float(_x) + float(_w) / 2) * width)
-#                         y2 = int((float(_y) + float(_h) / 2) * height)
-#                         # 计算面积
-#                         detect_area = abs(x1-x2)*abs(y1-y2)
-#                         results.append(
-#                             {
-#                                 'file_name':str(os.path.basename(detect_image_path)),
-#                                 'cls':_cls,
-#                                 'conf':_conf,
-#                                 'yolo_coord':f'(x:{round(float(_x),2)},y:{round(float(_y),2)},w:{round(float(_w),2)},h:{round(float(_h),2)})',
-#                                 'detect_coord':f'(x1:{x1},y1:{y1},x2:{x2},y2:{y2})',
-#                                 'detect_area':detect_area,
-#                                 'image_size':f'height:{height},width:{width}',
-#                                 'detect_image_base64':detect_image_base64,
-#                                 'file_path':str(os.path.dirname(detect_image_path))
-#                             }
-#                         )
-#                 success = True
-#             except Exception as e:
-#                 pass
-                
-#             if success:
-                
-#                 # files_info("file_id", 
-#                 #            image_id, 
-#                 #            "is_detected", 
-#                 #            f'{detect_image_id},{detect_txt_id}',
-#                 #            record_path=files_record_mapping()[str(FilesType.images)][1])
-#                 # is_detected_map = {detect_image_id:detect_image_path,detect_txt_id:detect_txt_path}
-#                 # record_msg = \
-#                 #         {
-#                 #             'file_id': image_id,
-#                 #             'weight_id':self.weight_id,
-#                 #             'is_detected':is_detected_map,
-#                 #             'file_create_time':str(self.time_stamp)
-#                 #         }
-#                 # data_record(record_msg,fieldnames=table_2(),save_path=files_record_mapping()[str(FilesType.detect)][1])
-                
-#                 detected_id= f'detect-{self.time_stamp}-{str(uuid4())}' # 检测结果id
-#                 _image = FileTable.query.filter_by(file_id=image_id).first()
-#                 if _image:
-#                     _image.is_detected = str(detected_id)
-                
-#                 from datetime import datetime,timezone
-#                 _detections = DetectionTable(
-#                             file_id = image_id,
-#                             weight_id = self.weight_id,
-#                             details = {
-#                                 "detect_image_path":detect_image_path,
-#                                 "detect_txt_path":detect_txt_path
-#                                 }
-#                             )
+                # 提交任务
+                for idx, batch in enumerate(batch_files):
+                    batch_paths = dict(batch)
+                    future = executor.submit(
+                        standard_test,
+                        model_path=weight_result[1],
+                        test_image_path=batch_paths
+                    )
+                    futures[future] = idx
 
-                
-#                 db.session.add(_detections)
-#                 db.session.commit()
-#                 return results
-    
-#     def detect_progress(self,file_id):
-#         original_file = FileTable.query.filter_by(file_id=str(file_id)).first().file_path
-#         detected_file = DetectionTable.query.filter_by(file_id=str(file_id)).first().details.get('detect_image_path',None)
-#         if original_file and detected_file:
-#             return int(get_videos_frame_count(detected_file)/get_videos_frame_count(original_file))
-#         return 0
+                # 收集结果
+                for future in as_completed(futures):
+                    batch_idx = futures[future]
+                    try:
+                        result = future.result()
+                        results += result
+                    except Exception as e:
+                        print(f"Batch {batch_idx} 执行失败: {e}")
         
-    
-#     def val_weight(self,dataYamlId):
-#         # self.data_yaml_path = files_info("file_id", 
-#         #                                  dataYamlId,
-#         #                                  record_path=files_record_mapping()[str(FilesType.yamls)][1]).get('file_path',None)
-        
-#         self.data_yaml_path = DatasetTable.query.filter_by(file_id=dataYamlId).first().file_path
-#         # 验证数据存储文件夹
-#         save_folder = os.path.join(PJ_ROOT, 'data', 'val',f"val-folder-{self.conf}-{self.time_stamp}-{str(uuid4())[20:]}")
-#         os.makedirs(save_folder, exist_ok=True)
-#         results = standard_val({
-#                                         'model':self.weight_path,
-#                                         'yaml_data':self.data_yaml_path,
-#                                         'conf_list':[self.conf]
-#                                         },
-#                                 save_folder=save_folder)  
-#         if results:
-#             # 确认权重
-#             # files_info("file_id", 
-#             #            self.weight_id, 
-#             #            "is_detected", 
-#             #            str(results),
-#             #            record_path=files_record_mapping()[str(FilesType.weights)][1]) 
-#             _weight = WeightTable.query.filter_by(file_id=self.weight_id).first()
-#             if _weight:
-#                 _weight.is_validated = str(results)
-#                 db.session.commit()
+        self.redis_client.setex(f"prediction:{datetime.now().date()}", 3600*24, json.dumps(results))    
+        return results
             
-#             # metrics
-#             metrics_reults = {}
-#             with open(os.path.join(save_folder,'metrics.txt'), 'r') as f:
-#                 metrics = f.readlines()
-#                 for metric in metrics:
-#                     metric_name, metric_value = metric.strip().split(': ')
-#                     metrics_reults.update({metric_name:metric_value})
-            
-#             # val_image
-#             file_name_list = [
-#                         'BoxF1_curve.png',
-#                         'BoxP_curve.png',
-#                         'BoxR_curve.png',
-#                         'BoxPR_curve.png',
-#                         'confusion_matrix_normalized.png',
-#                         'confusion_matrix.png',
-#                         'F1_curve.png',
-#                         'P_curve.png',
-#                         'R_curve.png',
-#                         'PR_curve.png',
-#                         'val_batch0_labels.jpg',
-#                         'val_batch0_pred.jpg',
-#                         'val_batch1_labels.jpg',
-#                         'val_batch1_pred.jpg',
-#                         'val_batch2_labels.jpg',
-#                         'val_batch2_pred.jpg',
-#                          ]
-
-#             val_images = [
-#                 f"data:image/png;base64,{TransferLocalImageFiles(os.path.join(save_folder,'val',file_name)).toBase64()}" 
-#                 for file_name in file_name_list if os.path.exists(_image:=os.path.join(save_folder,'val',file_name)) and os.path.isfile(_image) 
-#             ]
-            
-#             return {'metrics':metrics_reults,'val_images':val_images}   
-            
-#         return {}
-        
-        
-#     def validate(self,file_id):
-#         """
-#         验证视频 临时函数
-#         """
-        
-#         _video_detected = DetectionTable.query.filter_by(file_id=file_id).first().details
-#         _detect_txt_path = _video_detected.get('detect_txt_path',None)
-#         detect_table = []
-#         if _detect_txt_path:
-#             with open(_detect_txt_path, mode="r", encoding="utf-8") as f:
-#                 reader = csv.DictReader(f)
-#                 for row in reader:
-#                     detect_table.append(dict(row))
-            
-        
-#             return {"file_id":file_id,"detect_table":detect_table}
-        
-                
-        
-    
-#     def train_log(self,args):
-#         log_file_id = args['log_file_id']
-#         line_number = int(args['line_num'])
-#         log_file_id = FilesID('log_file_id',log_file_id)
-#         log_file = is_files_exist(log_file_id) # 一个
-#         log_file_path = log_file[0]['data'][0]['file_path']
-#         if not log_file_path:
-#             return {}
-#         log_file_path = os.path.join(log_file_path, 'train','results.csv')
-#         return get_line_data(log_file_path,line_number)
-        
-#     def train(self,args):
-#         # TODO 存在几个无默认值
-#         # time_stamp =str(time.strftime("%Y%m%d%H%M", time.localtime()))
-#         YAML_DATA = args['yaml_path']
-#         SAVE_FOLDER = args['save_folder']
-        
-#         # PR_NAME = args.get('pr_name', None) or '_Train'
-        
-#         # TIME_STAMP = time.strftime("%Y%m%d%H%M", time.localtime())
-#         BATCH_SIZE = int(args.get('batch_size', 8))
-#         EPOCHS = int(args.get('epochs', 500))
-#         IMAGE_SIZE = int(args.get('image_size', 640))    
-#         LEARING_RATE = float(args.get('learning_rate', 0.01))
-#         # DEVICE = int(args.get('device', 0))
-#         DEVICE = args.get('device', None) or ('cuda:0' if torch.cuda.is_available() else 'cpu')
-#         yolo_model = YOLO(os.path.join(PJ_ROOT, 'ultralytics/cfg/models/v8/yolov8.yaml')).load(os.path.join(PJ_ROOT, 'yolov8n.pt'))  # build from YAML and trainsfer weights
-#         # Train the model
-#         results = yolo_model.train(data=YAML_DATA, 
-#                             batch=BATCH_SIZE,
-#                             device=DEVICE,
-#                             project=SAVE_FOLDER,
-#                             # name=f"{PR_NAME}_{TIME_STAMP}",
-#                             epochs=EPOCHS, 
-#                             imgsz=IMAGE_SIZE,
-#                             cos_lr=True,
-#                             lr0=LEARING_RATE)
-#         del yolo_model
-#         torch.cuda.empty_cache()
-        
-#         # 训练文件夹
-#         train_folder_record_msg = \
-#             {
-#                 'file_id': f'folder-{self.time_stamp}-{str(str(uuid4()))}',
-#                 # 'file_real_name': f"{PR_NAME}_{TIME_STAMP}",
-#                 'file_real_name': f"{str(os.path.basename(SAVE_FOLDER))}",
-#                 'file_type': 'train_results_folder',
-#                 # 'file_path':os.path.join(SAVE_FOLDER, f"{PR_NAME}_{TIME_STAMP}"),
-#                 'file_path':str(os.path.join(SAVE_FOLDER,'train')),
-#                 'file_comment': f"train_results_folder",
-#                 'file_create_time': self.time_stamp
-#         }
-#         data_record(train_folder_record_msg)
-        
-#         # 权重文件
-#         weights_record_msg = \
-#             {
-#             'file_id': f'weight-{self.time_stamp}-{str(str(uuid4()))}',
-#             'file_real_name': 'best.pt',
-#             'file_type': 'yolo_weight',
-#             # 'file_path':str(os.path.join(SAVE_FOLDER, f"{PR_NAME}_{TIME_STAMP}",'weights','best.pt')),
-#             'file_path':str(os.path.join(SAVE_FOLDER,'train','weights','best.pt')),
-#             'file_comment': 'yolo_weight',
-#             'file_create_time': self.time_stamp
-#         }
-#         data_record(weights_record_msg)
-        
-
-#         torch.cuda.empty_cache()
-#         gc.collect()
-#         # return str(results.save_dir._str), str(weights_file_id)
-#         return str(train_folder_record_msg['file_id']), str(weights_record_msg['file_id'])
-        
-#     def predict(self,args)->None:
-#         """预测大于等于0.25的目标
-#         Returns:
-#             _type_: _description_
-#         """
-#         weight_path = args['weight_path']
-#         test_images_path = args['files_path']
-#         save_folder = os.path.join(PJ_ROOT, 'data', 'predict',f"Predict-{self.time_stamp}-{str(uuid4())[20:]}")
-#         os.makedirs(save_folder, exist_ok=True)
-#         detect_results = []
-#         yolo_model = YOLO(weight_path['file_path'])
-#         for test_image in test_images_path:
-#             predict_file_path = test_image['file_path']
-#             if not predict_file_path:
-#                 detect_results.append(
-#                     {
-#                         'file_name': None,
-#                         'original_file_id': test_image['file_id'],
-#                         'predict_file_id': None,
-#                         'boxes': [],
-#                         'msg': '文件可能不存在'
-#                     }
-#                 )
-#                 continue
-#             if os.path.isfile(predict_file_path):
-#                 try:              
-#                     results = yolo_model(test_image['file_path'], conf=0.25)
-#                     results_boxes =[]
-#                     for result in results:
-#                         boxes = result.boxes  # Boxes object for bounding box outputs
-#                         file_path = str(result.path)
-#                         file_name = os.path.basename(file_path)
-#                         for _box in boxes:
-#                             _conf = round(float(_box.conf.tolist()[0]),2)
-#                             _xywhn = _box.xywhn.tolist()[0]    
-#                             _cls = _box.cls.tolist()[0]
-#                             results_boxes.append(
-#                                 {
-#                                     'class_name': int(_cls),
-#                                     'confidence': _conf,
-#                                     'x': _xywhn[0],
-#                                     'y': _xywhn[1],
-#                                     'w': _xywhn[2],
-#                                     'h': _xywhn[3]
-#                                 }
-#                             ) 
-                        
-#                         test_save_path = str(os.path.join(save_folder, file_name))
-#                         result.save(test_save_path)
-#                         record_msg = \
-#                         {
-#                             'file_id': f'predict-{self.time_stamp}-{str(uuid4())}',
-#                             'file_real_name': str(file_name),
-#                             'file_type': 'yolo_predict_image',
-#                             'file_path':test_save_path,
-#                             'file_comment': 'yolo_predict_image',
-#                             'file_create_time': self.time_stamp
-#                         }
-#                         data_record(record_msg)
-                        
-#                         detect_results.append(
-#                             {
-#                                 'file_name': file_name,
-#                                 'predict_base64': f'data:image/png;base64,{TransferLocalImageFiles(test_save_path).toBase64()}',
-#                                 'original_file_id': test_image['file_id'],
-#                                 'predict_file_id': record_msg['file_id'],
-#                                 'boxes': results_boxes,
-#                                 'msg': f'检测到{len(results_boxes)}个目标'
-#                             }
-#                         )
-#                 except:
-#                     continue
-#             elif os.path.isdir(predict_file_path):
-#                 for img in os.listdir(predict_file_path):
-#                     try:
-#                         if img.endswith(('.jpg', '.png', '.jpeg')):
-#                             results = yolo_model(os.path.join(predict_file_path, img), conf=0.25)
-#                             results_boxes =[]
-#                             for result in results:
-#                                 boxes = result.boxes  # Boxes object for bounding box outputs
-#                                 file_path = str(result.path)
-#                                 file_name = os.path.basename(file_path)
-#                                 for _box in boxes:
-#                                     _conf = round(float(_box.conf.tolist()[0]),2)
-#                                     _xywhn = _box.xywhn.tolist()[0]    
-#                                     _cls = _box.cls.tolist()[0]
-#                                     results_boxes.append(
-#                                         {
-#                                             'class_name': int(_cls),
-#                                             'confidence': _conf,
-#                                             'x': _xywhn[0],
-#                                             'y': _xywhn[1],
-#                                             'w': _xywhn[2],
-#                                             'h': _xywhn[3]
-#                                         }
-#                                     ) 
-                                
-#                                 test_save_path = str(os.path.join(save_folder, file_name))
-#                                 result.save(test_save_path)
-#                                 record_msg = \
-#                                 {
-#                                     'file_id': f'predict-{self.time_stamp}-{str(uuid4())}',
-#                                     'file_real_name': str(file_name),
-#                                     'file_type': 'yolo_predict_image',
-#                                     'file_path':test_save_path,
-#                                     'file_comment': 'yolo_predict_image',
-#                                     'file_create_time': self.time_stamp
-#                                 }
-#                                 data_record(record_msg)
-                                
-#                                 detect_results.append(
-#                                     {
-#                                         'file_name': file_name,
-#                                         'predict_base64': f'data:image/png;base64,{TransferLocalImageFiles(test_save_path).toBase64()}',
-#                                         'original_file_id': test_image['file_id'],
-#                                         'predict_file_id': record_msg['file_id'],
-#                                         'boxes': results_boxes,
-#                                         'msg': f'检测到{len(results_boxes)}个目标'
-#                                     }
-#                                 )
-#                     except:
-#                         continue
-            
-#             # 清除模型和缓存
-#             del yolo_model
-#             torch.cuda.empty_cache()
-#             # 写入日志
-#             with open(os.path.join(save_folder, 'predict_log.json'), 'a') as f:
-#                 json_str = json.dumps(detect_results, indent=4, ensure_ascii=False)
-#                 f.write(json_str + '\n')
-            
-#             record_msg = \
-#                 {
-#                     'file_id': f'log-{self.time_stamp}-{str(uuid4())}',
-#                     'file_real_name': 'predict_log.json',
-#                     'file_type': 'yolo_predict_log',
-#                     'file_path':os.path.join(save_folder, 'predict_log.json'),
-#                     'file_comment': 'yolo_predict_log',
-#                     'file_create_time': self.time_stamp
-#                 }
-#             data_record(record_msg)
-            
-#         # torch.cuda.empty_cache()
-#         # gc.collect()
-        
-#         # 返回日志id 和 预测结果
-#         return str(record_msg['file_id']),detect_results
-   
-#     def val(self,args):
-#         yaml_path = args['yaml_path']
-#         weight_path = args['weight_path']
-#         save_folder = os.path.join(PJ_ROOT, 'data', 'val',f"Val-{self.time_stamp}-{str(uuid4())[20:]}")
-#         os.makedirs(save_folder, exist_ok=True)
-#         _confidences = args.get('conf',0.25)
-#         BATCH_SIZE = int(args.get('batch_size',8))
-#         IMAGE_SIZE = int(args.get('image_size',640))
-#         # DEVICE = int(args.get('device',0))
-#         DEVICE = args.get('device', None) or ('cuda:0' if torch.cuda.is_available() else 'cpu')
-#         PLOTS = True
-#         try:
-#             _confidences = str(_confidences).split(',') 
-#             _confidences = [round(float(i),2) for i in _confidences]
-#         except:
-#             _confidences = [round(float(_confidences),2)]
-#         _confidences += [0.5, 0.75]
-#         yolo_model = YOLO(weight_path['file_path'])  # load a custom model
-#         result_boxes = [] # 保存每个阈值下的结果
-#         folder_boxes = [] # 保存验证文件的路径
-#         for _CONF in _confidences:
-#             metrics = yolo_model.val(
-#                         data=yaml_path['file_path'],
-#                         imgsz=IMAGE_SIZE,
-#                         batch=BATCH_SIZE,
-#                         project=str(save_folder),
-#                         name=str(_CONF),
-#                         device=DEVICE,
-#                         plots=PLOTS,
-#                         conf = _CONF
-#                     )
-       
-#             # 验证文件夹
-#             folder_record_msg = \
-#                 {
-#                     'file_id': f'val-{self.time_stamp}-{str(uuid4())}',
-#                     'file_real_name': str(_CONF),
-#                     'file_type': 'yolo_val_folder',
-#                     'file_path':os.path.join(save_folder,str(_CONF)),
-#                     'file_comment': 'yolo_val_folder',
-#                     'file_create_time': self.time_stamp
-#                 }
-#             data_record(folder_record_msg)
-            
-#             result_boxes.append({
-#                 'conf': _CONF,
-#                 'map50': round(float(metrics.box.map50),2),
-#                 'map75': round(float(metrics.box.map75),2),
-#                 'map50-95': round(float(metrics.box.map),2),
-#                 'file_id': str(folder_record_msg['file_id']),
-#             })
-#             folder_boxes.append({
-#                 'conf': _CONF,
-#                 'file_id': folder_record_msg['file_id'],
-#             })
-            
-#         val_results = {
-#             "yaml_id": yaml_path['file_id'],
-#             "weight_id": weight_path['file_id'],
-#             "result_boxes": result_boxes,
-#         }
-        
-#         # 写入日志
-#         with open(os.path.join(save_folder, 'val_log.json'), 'a') as f:
-#             json_str = json.dumps(val_results, indent=4, ensure_ascii=False)
-#             f.write(json_str + '\n')
-        
-#         # 日志文件
-#         log_record_msg = \
-#             {
-#                 'file_id': f'log-{self.time_stamp}-{str(uuid4())}',
-#                 'file_real_name': 'val_log.json',
-#                 'file_type': 'yolo_val_log',
-#                 'file_path':os.path.join(save_folder, 'val_log.json'),
-#                 'file_comment': 'yolo_val_log',
-#                 'file_create_time': self.time_stamp
-#             }
-#         data_record(log_record_msg)
-        
-#         # torch.cuda.empty_cache()
-#         # gc.collect()
-        
-#         # 返回日志id, 验证结果,验证文件夹id
-#         return str(log_record_msg['file_id']), val_results, folder_boxes
-
-
-# class TrainScripts:
-#     def __init__(self):
-#         self.time_stamp = str(time.strftime('%Y%m%d%H%M', time.localtime()))
-#     def get_train_point(self,train_comment='',is_create=False):
-#         folder_name = f"{self.time_stamp}{train_comment}-{str(uuid4())}"
-#         save_path = os.path.join(PJ_ROOT, 'data', 'train',folder_name)
-#         os.makedirs(save_path, exist_ok=True)
-#         folder_info = {
-#                 'file_id': f'folder-{self.time_stamp}-{str(uuid4())}',
-#                 'file_real_name': str(folder_name),
-#                 'file_type': 'train_folder(created)',
-#                 'file_path':str(save_path),
-#                 'file_comment': str(train_comment) if len(train_comment) > 1 else 'train_folder(created)', 
-#                 'file_create_time':str(self.time_stamp) 
-#             }
-#         data_record(folder_info)
-#         # 如果需要创建文件夹
-#         folder_list = []
-#         folder_id = folder_info['file_id']
-#         yaml_file_id = None
-#         if is_create:
-#             folder_list = []
-#             for _dir in ['images', 'labels']:
-#                 for _condition in ['train', 'val']:
-#                     _folder = f"{_dir}/{_condition}"
-#                     _folder_path = os.path.join(save_path, _folder)
-#                     os.makedirs(_folder_path, exist_ok=True)
-#                     folder_record_msg = \
-#                         {
-#                             'file_id': f"folder-{self.time_stamp}-{str(uuid4())}",
-#                             'file_real_name': str(_condition),
-#                             'file_type': f'{_folder}-folder',
-#                             'file_path':str(_folder_path),
-#                             'file_comment': f'{str(_folder)}-yolo-dataset',
-#                             'file_create_time': str(self.time_stamp)
-#                         }
-#                     data_record(folder_record_msg)
-#                     folder_id = folder_record_msg['file_id']
-#                     folder_list.append({
-#                         'folder_name': str(_folder),
-#                         'folder_id': folder_id,
-#                     })
-#             # yaml
-#             with open(os.path.join(save_path, 'train.yaml'), 'a') as f:
-#                 f.write(f"path : {save_path}\n")
-#                 f.write(f"train: {os.path.join(save_path, 'images/train')}\n")
-#                 f.write(f"val: {os.path.join(save_path, 'images/val')}\n")
-#                 f.write(f"names: \n")
-#                 f.write(f"  0: anomaly\n")
-#                 f.flush()
-#                 yaml_record_msg = \
-#                     {
-#                         'file_id': f"yaml-{str(uuid4())}",
-#                         'file_real_name': 'train.yaml',
-#                         'file_type': f'yolo_yaml_config',
-#                         'file_path':str(os.path.join(save_path, 'train.yaml')),
-#                         'file_comment': f'{str(train_comment)}-yolo_yaml_config',
-#                         'file_create_time': str(self.time_stamp)
-#                     }
-#                 yaml_file_id = yaml_record_msg['file_id']
-#                 data_record(yaml_record_msg)
-        
-#         # 生成训练训练结果所在的文件夹
-#         train_save_folder = os.path.join(PJ_ROOT, 'data','results',f"{self.time_stamp}-Train-{str(uuid4())[20:]}")
-#         os.makedirs(train_save_folder,exist_ok=True)
-#         train_save_folder_msg = \
-#                     {
-#                         'file_id': f"folder-{self.time_stamp}-{str(uuid4())}",
-#                         'file_real_name': str(os.path.basename(train_save_folder)),
-#                         'file_type': f'train_results_folder',
-#                         'file_path':str(train_save_folder),
-#                         'file_comment': f'train_results_folder',
-#                         'file_create_time': str(self.time_stamp)
-#                     }
-#         train_save_folder_id = train_save_folder_msg['file_id']
-#         data_record(train_save_folder_msg)
-          
-#         return {"folder_id": folder_id,"is_create":is_create,"save_folder":folder_list,"yaml_file_id":yaml_file_id,"train_save_folder_id":train_save_folder_id}       
-            
-            
-#     def upload_yolo_datasets(self,folder_id,train_data,file_ext,train_comment=''):
-#         # 获取文件扩展名
-#         # TODO
-#         # file_ext = os.path.splitext(train_data.filename)[1].lower()
-#         train_comment = str(train_comment) if len(train_comment) > 1 else 'train_data'
-#         folder_id = FilesID('folder_id',folder_id)
-#         folder_info = is_files_exist(folder_id) # 一个
-#         if not folder_info[0]['data'][0]['file_path']:
-#             return 'folder'
-#         save_folder = folder_info[0]['data'][0]['file_path']
-#         # 创建临时文件
-#         temp_fd, temp_path = tempfile.mkstemp(suffix=file_ext)
-#         try:
-#             # 关闭文件描述符，将使用文件名
-#             os.close(temp_fd)
-#             # 保存上传的文件到临时位置
-#             train_data.save(temp_path)
-#             os.makedirs(save_folder, exist_ok=True)
-#             # 根据文件扩展名选择不同的解压方法
-#             if file_ext == '.zip':
-#                 extract_zip(temp_path, save_folder)
-#             elif file_ext == '.rar':
-#                 extract_rar(temp_path, save_folder)
-#             elif file_ext == '.7z':
-#                 extract_7z(temp_path, save_folder)
-        
-#         except Exception as e:
-#             return f'Extraction failed: {str(e)}'
-        
-#         finally:
-#             # 删除临时文件
-#             if os.path.exists(temp_path):
-#                 os.remove(temp_path)
-            
-#         # 找到save_folder内以.yaml结尾的文件
-#         yaml_files = glob.glob(os.path.join(save_folder, '*.yaml'))
-#         if not yaml_files or len(yaml_files)!=1:
-#             return 'yaml'
-        
-#         update_yaml_config(
-#             yaml_file = yaml_files[0], 
-#             new_values = {
-#             "path": str(save_folder),
-#             "train": str(os.path.join(save_folder, 'images/train')),
-#             "val": str(os.path.join(save_folder, 'images/val'))
-#             }
-#         )
-#         #  yaml_data
-#         yaml_record_msg = \
-#                 {
-#                     'file_id': f"yaml-{str(uuid4())}",
-#                     'file_real_name': str(os.path.basename(yaml_files[0])),
-#                     'file_type': 'yolo_yaml_config',
-#                     'file_path':str(yaml_files[0]),
-#                     'file_comment': f'{str(train_comment)}yolo_yaml_config',
-#                     'file_create_time': str(self.time_stamp)
-#                 }
-#         data_record(yaml_record_msg)
-        
-#         # 训练文件夹
-#         datasets_folder = os.path.dirname(yaml_files[0])
-#         folder_list = []
-#         for _dir in ['images', 'labels']:
-#             for _condition in ['train', 'val']:
-#                 _folder = f"{_dir}/{_condition}"
-#                 _folder_path = os.path.join(datasets_folder, _folder)
-#                 folder_record_msg = \
-#                     {
-#                         'file_id': f"folder-{str(uuid4())}",
-#                         'file_real_name': str(_condition),
-#                         'file_type': f'{_folder}-folder',
-#                         'file_path':str(_folder_path),
-#                         'file_comment': f'{str(_folder)}-yolo-dataset',
-#                         'file_create_time': str(self.time_stamp)
-#                     }
-#                 data_record(folder_record_msg)
-#                 folder_list.append({
-#                     'folder_name': str(_folder),
-#                     'folder_id': folder_record_msg['file_id'],
-#                 })
-        
-#         return {"yaml_file_id": yaml_record_msg['file_id'],"save_folder":folder_list}
-
-
-
-
-
-# if __name__ == '__main__':
-#     # weight_path = '2dec00d4-e414-4136-bb92-33c4d0e91cf4'
-#     # test_images_path = ['image-202504112318-e8fdae37-c9ae-44ac-903b-8a86d097350a','image-202504112149-9a5b625c-bc25-4cdb-9cef-f95478cbb63a']
-#     # yolo_api = YoloAPI()
-#     # yolo_api.predict(weight_path,test_images_path=test_images_path,save_path='save_path')
-
-
-#     val = os.path.splitext('/Users/katsura/Documents/code/ultralytics/_api/data/predict/predict-202508150221-588-4d7d14fbb888/predict_results_conf0.25/003.png')
-#     print(val)
+  

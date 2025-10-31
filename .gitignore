@@ -175,3 +175,5 @@ calibration_*.npy
 
 # augment
 _project/mydata/_code/_augment
+_api/data
+*.pt

@@ -11,13 +11,14 @@ import gc
 import glob
 from _api._utils.ImagestransferComponent.FromLocalImageFiles import TransferLocalImageFiles
 from concurrent.futures import ThreadPoolExecutor
-from sqlmodel import Session
+from sqlmodel import Session,select
 from datetime import datetime
 from sqlalchemy import Column, JSON
 from _api.configuration.DatabaseSession import engine as SQL_ENGINE
-from sqlmodel import select
 from _api.models.file import File as FileObject
 import time
+from _api.configuration.RedisConfig import redis_config
+import json
 
 def standard_val(val_data:dict,only_one = True,save_folder=None)->None:
     """
@@ -101,20 +102,22 @@ def standard_val(val_data:dict,only_one = True,save_folder=None)->None:
                         'val_batch2_labels.jpg',
                         'val_batch2_pred.jpg',
             ]
-            def load_image_if_exists(item):
-                img_path = os.path.join(SAVE_FOLDER, 'val', item)
-                if os.path.exists(img_path):
-                    try:
-                        return {
-                            'name': item,
-                            'image': f"data:image/png;base64,{TransferLocalImageFiles(img_path).toBase64()}"
-                        }
-                    except Exception as e:
-                        print(f"加载 {item} 失败: {e}")
-                return None
+            # def load_image_if_exists(item):
+            #     img_path = os.path.join(SAVE_FOLDER, 'val', item)
+            #     if os.path.exists(img_path):
+            #         try:
+            #             return {
+            #                 'name': item,
+            #                 'image': f"data:image/png;base64,{TransferLocalImageFiles(img_path).toBase64()}"
+            #             }
+            #         except Exception as e:
+            #             print(f"加载 {item} 失败: {e}")
+            #     return None
             
-            with ThreadPoolExecutor(max_workers=8) as executor:
-                val_images = [img for img in executor.map(load_image_if_exists, val_images_list) if img]
+            # with ThreadPoolExecutor(max_workers=8) as executor:
+            #     val_images = [img for img in executor.map(load_image_if_exists, val_images_list) if img]
+             
+            val_images = [{"name": item, "image": os.path.join(SAVE_FOLDER, 'val',item)} for item in val_images_list if os.path.exists(os.path.join(SAVE_FOLDER, 'val',item))]
              
             # 返回数据
             results.append(
@@ -138,20 +141,35 @@ def standard_val(val_data:dict,only_one = True,save_folder=None)->None:
             # 写入数据库
             if WEIGHT_ID:
                 with Session(SQL_ENGINE) as session:
-                    query = select(FileObject.id, FileObject.model_metrics).where(FileObject.id == WEIGHT_ID)
+                    query = select(FileObject).where(FileObject.id == WEIGHT_ID)
                     weight_data = session.exec(query).first()
-
                     if not weight_data:
                         raise ValueError(f"权重文件ID {WEIGHT_ID} 不存在")  # 使用更具体的异常类型
-
                     if not weight_data.model_metrics:
                         weight_data.model_metrics = results
                     else:
-                        weight_data.model_metrics.append(results[0])
-
+                        weight_data.model_metrics = results + weight_data.model_metrics 
                     weight_data.updated_at = datetime.utcnow()
-
-                    session.commit()  # 这是关键，提交修改
+                    session.commit()
+                    
+                    
+                # 缓存结果
+                redis_client = redis_config.get_client()
+                redis_key = f"validation:{WEIGHT_ID}"
+                cached_data = redis_client.get(redis_key)
+                if cached_data:
+                    cached_data = json.loads(cached_data)
+                    cached_data = results + cached_data
+                else:
+                    cached_data = results
+                # redis_client.setex(redis_key,3600*24, json.dumps(cached_data))
+                cursor = 0
+                while True:
+                    cursor, keys = redis_client.scan(cursor, match=f"{redis_key}*")
+                    for key in keys:
+                        redis_client.setex(key,3600*24, json.dumps(cached_data))
+                    if cursor == 0: 
+                        break
 
              
         if only_one: 

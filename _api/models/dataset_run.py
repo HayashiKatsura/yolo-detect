@@ -69,6 +69,10 @@ class DatasetRun(SQLModel, table=True):
     )
     
     def to_dict(self):
+        def datetime_to_str(dt):
+            if isinstance(dt, datetime):
+                return dt.strftime("%Y-%m-%d %H:%M:%S")  
+            return dt 
         return {
             "id": self.id,
             "dataset_id": self.dataset_id,
@@ -78,4 +82,9 @@ class DatasetRun(SQLModel, table=True):
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "metrics": self.metrics,
+            "artifacts": self.artifacts,
+            "params": self.params,
+            "remark": self.remark,
+            "created_at": datetime_to_str(self.created_at),
+            "updated_at": datetime_to_str(self.updated_at)
         }

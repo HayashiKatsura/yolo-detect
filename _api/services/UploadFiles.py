@@ -88,11 +88,17 @@ def datasets_validate(zip_save_path: str):
         yaml_path = yaml_config_list[0]
         new_names = read_yaml(yaml_path).get('names',None)
         new_names = None if new_names=={} else new_names
-    
+        
+        train_folder = os.path.join(dataset_folder,'images','train')
+        val_folder = os.path.join(dataset_folder,'images','val')
+        
+        train_count = len([f for f in glob.glob(os.path.join(train_folder, "*.*")) if os.path.isfile(f) and os.path.splitext(f)[1].lower() in ['.jpg', '.jpeg', '.png']])
+        val_count = len([f for f in glob.glob(os.path.join(val_folder, "*.*")) if os.path.isfile(f) and os.path.splitext(f)[1].lower() in ['.jpg', '.jpeg', '.png']])
+        
         ctx_list=[
                 {'path':dataset_folder},
-                {'train':os.path.join(dataset_folder,'images','train')},
-                {'val':os.path.join(dataset_folder,'images','val')},
+                {'train':train_folder},
+                {'val':val_folder},
                 {'names':new_names}
             ]
         update_yaml_keys(
@@ -101,7 +107,15 @@ def datasets_validate(zip_save_path: str):
         )
         results = {
             'name':os.path.basename(dataset_folder),
-            'yaml_path':yaml_path
+            'yaml_path':yaml_path,
+            'train_cases_count': train_count,
+            'val_cases_count': val_count,
+            'last_train_cases_count':train_count,
+            'last_val_cases_count':val_count,
+            'train_count':0,
+            'train_date':None,
+            'metrics':None
+            
         }
         for item in ctx_list:
             results.update(item)
