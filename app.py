@@ -25,6 +25,6 @@ def root():
 
 if __name__ == '__main__':
     import uvicorn
-    init_storage() # 会清空所有缓存，仅测试用
+    # init_storage() # 会清空所有缓存，仅测试用
     uvicorn.run("app:app", host="0.0.0.0", port=5130,reload=True)
     

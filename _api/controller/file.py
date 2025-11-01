@@ -38,8 +38,7 @@ async def upload_files(
     results = UploadFiles(
         files_type=files_type,
         files_data=files_data,
-        folder_id=folder_id
-    )._upload_file_local_storage()
+    )._upload_file_local_storage(folder_id=folder_id)
 
     return JSONResponse(
         content=NoStandardResponse(ResponseCode.SUCCESS, "success", data=results).get_response_body()
