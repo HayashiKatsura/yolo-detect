@@ -30,7 +30,9 @@ class File(SQLModel, table=True):
     original_filename: str = Field(max_length=255)
 
     # 本地路径（建议相对路径）
-    storage_path: str = Field(sa_column=Column(Text, nullable=False))
+    # storage_path: str = Field(sa_column=Column(Text, nullable=False))
+    storage_path: str = Field(max_length=1024)
+    
 
     # 文件大小（字节）
     # size_bytes: Optional[int] = Field(
@@ -41,13 +43,16 @@ class File(SQLModel, table=True):
 
 
     # 结构化结果：图像/视频检测结果
-    media_annotations: Optional[Dict[str, Any]] = Field(
-        default=None,
-        sa_column=Column(MYSQL_JSON)
-    )
+    # media_annotations: Optional[Dict[str, Any]] = Field(
+    #     default=None,
+    #     sa_column=Column(MYSQL_JSON)
+    # )
+    
+    media_annotations: Optional[List[dict]] = Field(default=None, sa_column=Column(MYSQL_JSON))
+    
 
     # 结构化结果：权重评估指标
-    model_metrics: Optional[List[dict]] = Field(default=[], sa_column=Column(MYSQL_JSON))  # 使用列表存储多个验证记录
+    model_metrics: Optional[List[dict]] = Field(default=None, sa_column=Column(MYSQL_JSON))
 
 
     # 备注

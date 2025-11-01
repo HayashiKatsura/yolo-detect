@@ -144,6 +144,7 @@ class GetFilesData:
             with Session(SQL_ENGINE) as session:
                 query = select(FileObject.storage_path,FileObject.original_filename).where(FileObject.id == self.file_id)
                 storage_path,file_name = session.execute(query).first()
+                media_type = get_mime_type(storage_path)
             
         return {
             "path": storage_path,

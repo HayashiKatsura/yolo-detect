@@ -108,7 +108,7 @@ class DownloadFiles:
         
         return files_info
     
-    def _download_single_file(self):
+    def exec_download_file(self):
         """
         下载单个文件
         """
@@ -137,7 +137,7 @@ class DownloadFiles:
             'media_type': mime_type,
         }
     
-    def _download_as_zip(self):
+    def exec_download_zip(self):
         """
         批量下载，打包成ZIP
         

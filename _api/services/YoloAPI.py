@@ -76,7 +76,7 @@ class YoloAPI:
         """
         启动子线程
         """
-        save_path = os.path.join(PJ_ROOT,'_api/data/train',f"{str(time.strftime('%Y%m%d%H%M', time.localtime()))}-{train_params['name']}")    
+        save_path = os.path.join(PJ_ROOT,'_api/data/trains',f"{str(time.strftime('%Y%m%d%H%M', time.localtime()))}-{train_params['name']}")    
         try:
             process = multiprocessing.Process(
                 target=standard_train, 

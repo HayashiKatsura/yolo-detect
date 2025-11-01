@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from _api.controller import model as model_router
 from _api.controller import file as file_router
 from _api.controller import data as data_router
+from _api._utils.InitialStorage import init_storage
 
 app = FastAPI(title="YOLO Management API", version="0.1.0")
 
@@ -24,5 +25,6 @@ def root():
 
 if __name__ == '__main__':
     import uvicorn
+    init_storage() # 会清空所有缓存，仅测试用
     uvicorn.run("app:app", host="0.0.0.0", port=5130,reload=True)
     

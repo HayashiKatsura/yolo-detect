@@ -111,7 +111,7 @@ def standard_test(model_path:str,
             path_to_id = {path: file_id for file_id, path in batch_items}
             
             results = model.predict(batch_paths, conf=conf)
-            save_folder = os.path.join(PJ_ROOT, '_api/data/prediction', f'{time_stamp}-{random_id}')
+            save_folder = os.path.join(PJ_ROOT, '_api/data/predictions', f'{time_stamp}-{random_id}')
             os.makedirs(save_folder, exist_ok=True)
             
             for result in results:

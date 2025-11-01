@@ -1,7 +1,0 @@
-path: /Users/katsura/Documents/code/ultralytics-12/_api/data/datasets/202510272245-23d1b250-1fb1-49fb-bae5-a5e43af66280/pipelinedataset
-train: /Users/katsura/Documents/code/ultralytics-12/_api/data/datasets/202510272245-23d1b250-1fb1-49fb-bae5-a5e43af66280/pipelinedataset/images/train
-val: /Users/katsura/Documents/code/ultralytics-12/_api/data/datasets/202510272245-23d1b250-1fb1-49fb-bae5-a5e43af66280/pipelinedataset/images/val
-names:
-  0: crack
-  1: corrosion
-  2: obstacle

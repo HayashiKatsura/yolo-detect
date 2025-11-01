@@ -9,7 +9,7 @@ from _api.services.DownloadFiles import DownloadFiles
 from fastapi.responses import FileResponse
 from _api.services.GetFilesData import GetFilesData
 from _api.configuration.RequestBody import *
-
+import os
 
 
 # 依赖：日志装饰器在 FastAPI 里通常写成 dependency
@@ -61,35 +61,14 @@ async def delete_files(
         content=NoStandardResponse(ResponseCode.SUCCESS, "success", data=results).get_response_body()
     )
 
-# @router.get("/download-files/{file_id}")
-# def download_file(
-#     request:DeleteFilesRequest,
-# ):
-#     """
-#     下载文件
-#     """
-#     results = DownloadFiles(
-#         file_ids=request.file_ids
-#     )._download_local_storage()
-#     if results['msg'] !='ok':
-#         return JSONResponse(
-#             content=NoStandardResponse(ResponseCode.NOT_FOUND, "下载失败", data=None).get_response_body()
-#         )
-#     return FileResponse(
-#         path=results['path'],
-#         filename=results['filename'],
-#         media_type=results['media_type'],
-#     )
-
 
 @router.get("/download-file/{file_id}")
-def download_single_file(file_id: Union[str, int]):
+def download_file(file_id: Union[str, int]):
     """
     下载单个文件
     """
     try:
-        downloader = DownloadFiles(file_ids=[file_id])
-        result = downloader._download_single_file()
+        result = DownloadFiles(file_ids=[file_id]).exec_download_file()
         
         if result['msg'] != 'ok':
             raise HTTPException(status_code=404, detail=result['msg'])
@@ -104,7 +83,7 @@ def download_single_file(file_id: Union[str, int]):
 
 
 @router.post("/download-files")
-def download_multiple_files(
+def download_files(
     file_ids: List[Union[str, int]] = Body(..., embed=True, description="要下载的文件ID列表"),
     force_zip: bool = Body(False, description="强制打包成ZIP")
 ):
@@ -122,7 +101,7 @@ def download_multiple_files(
     try:
         # 单文件直接下载
         if len(file_ids) == 1 and not force_zip:
-            return download_single_file(file_ids[0])
+            return download_file(file_ids[0])
         
         downloader = DownloadFiles(file_ids=file_ids)
         
@@ -141,7 +120,7 @@ def download_multiple_files(
             )
         
         # 多文件或强制打包，返回ZIP
-        result = downloader._download_as_zip()
+        result = downloader.exec_download_zip()
         
         if result['msg'] != 'ok':
             raise HTTPException(status_code=404, detail=result['msg'])
@@ -161,7 +140,7 @@ def download_multiple_files(
 
 
 @router.post("/download-files-zip")
-def download_files_as_zip(
+def exec_download_zip(
     file_ids: List[Union[str, int]] = Body(..., embed=True, description="要下载的文件ID列表")
 ):
     """
@@ -172,7 +151,7 @@ def download_files_as_zip(
     
     try:
         downloader = DownloadFiles(file_ids=file_ids)
-        result = downloader._download_as_zip()
+        result = downloader.exec_download_zip()
         
         if result['msg'] != 'ok':
             raise HTTPException(status_code=404, detail=result['msg'])
@@ -190,14 +169,6 @@ def download_files_as_zip(
         raise HTTPException(status_code=500, detail=f"打包失败: {str(e)}")
 
 
-
-
-
-
-
-
-import mimetypes
-import os
 @router.get("/show-files/{file_id}")
 async def show_files(
     file_id: str,
@@ -212,27 +183,6 @@ async def show_files(
     - `page`：页码，默认值为 1
     - `page_size`：每页数量，默认 10，最大值为 100
     """
-    # file_path = '/Users/katsura/Documents/code/ultralytics-12/_api/logs/train/202510311858-Test.log'
-    # mime_type, _ = mimetypes.guess_type(file_path)
-    # if (mime_type and mime_type.startswith("text")) or file_path.endswith((".log", ".txt", ".yaml", ".yml", ".json")):
-    # # 二进制读取，避免换行被破坏
-    #     def file_iterator():
-    #         with open(file_path, "rb") as f:
-    #             for chunk in iter(lambda: f.read(1024 * 64), b""):
-    #                 yield chunk
-
-    # return StreamingResponse(
-    #     file_iterator(),
-    #     media_type=f"{mime_type or 'text/plain'}; charset=utf-8",
-    #     headers={
-    #         "Content-Disposition": f'inline; filename="{os.path.basename(file_path)}"'
-    #     },
-    # )
-    
-    
-    
-    
-    
     results = GetFilesData(
         file_type=file_type,
         file_id=file_id,
